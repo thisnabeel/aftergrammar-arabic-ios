@@ -31,6 +31,8 @@ struct ChapterReaderView: View {
     @State private var paywallPresented = false
     /// When set, layer items show matching `sub_layer_items` body/hint when present.
     @State private var selectedSublayerName: String?
+    /// Controls whether the Record controls row is expanded for the Record tab.
+    @State private var isRecordControlsExpanded = false
 
     init(chapterId: Int, breadcrumbTitles: [String] = [], listContextTitle: String = "") {
         self.chapterId = chapterId
@@ -57,7 +59,16 @@ struct ChapterReaderView: View {
                     VStack(spacing: 0) {
                         ReaderTopTabs(
                             selected: $topTab,
+                            showLayersTab: !uniqueSublayerNames(in: detail).isEmpty,
+                            sublayerNames: uniqueSublayerNames(in: detail),
+                            selectedSublayerName: $selectedSublayerName,
                             showQuizTab: showQuizTab,
+                            onSelectTab: { tab in
+                                if tab == .record { isRecordControlsExpanded = true }
+                            },
+                            onRetapRecord: {
+                                isRecordControlsExpanded.toggle()
+                            },
                             onRetapQuiz: handleQuizTabRetap,
                             quizAlwaysAccentWhenSingle: playableQuizCount == 1 && showQuizTab
                         )
@@ -65,7 +76,7 @@ struct ChapterReaderView: View {
                             .padding(.vertical, 10)
                             .background(topTabsBackground)
 
-                        if topTab == .record {
+                        if topTab == .record, isRecordControlsExpanded {
                             RecordControlsRow(
                                 isRecording: recorder.state == .recording,
                                 listNudgeToken: $listNudgeToken,
@@ -173,6 +184,11 @@ struct ChapterReaderView: View {
         quizzesFetchCompleted && quizHasQuestions
     }
 
+    private func onlyRecordTabVisible(_ detail: ChapterDetailResponse) -> Bool {
+        let hasLayers = !uniqueSublayerNames(in: detail).isEmpty
+        return !hasLayers && !showQuizTab
+    }
+
     /// Single playable quiz: never show the secondary row (even after closing the sheet). Multiple quizzes, loading, or no questions yet: show row.
     private var showQuizSubcontrolsRow: Bool {
         if quizzesLoading { return true }
@@ -275,7 +291,7 @@ struct ChapterReaderView: View {
     private func defaultLayerScroll(_ detail: ChapterDetailResponse) -> some View {
         if let layer = Self.pickDefaultLayer(from: detail.chapterLayers) {
             ScrollView {
-                DefaultLayerContentView(items: layer.chapterLayerItems)
+                DefaultLayerContentView(items: layer.chapterLayerItems, sublayerSelection: selectedSublayerName)
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(readerCardBackground)
@@ -330,6 +346,12 @@ struct ChapterReaderView: View {
                 itemsPage: 1
             )
             detail = merged
+            if uniqueSublayerNames(in: merged).isEmpty, topTab == .layers {
+                topTab = .record
+            }
+            if onlyRecordTabVisible(merged), topTab == .record {
+                isRecordControlsExpanded = false
+            }
             isLoading = false
 
             Task {
@@ -360,6 +382,12 @@ struct ChapterReaderView: View {
 
                 merged = combined
                 detail = merged
+                if uniqueSublayerNames(in: merged).isEmpty, topTab == .layers {
+                    topTab = .record
+                }
+                if onlyRecordTabVisible(merged), topTab == .record {
+                    isRecordControlsExpanded = false
+                }
                 page += 1
             }
             isLoadingMoreItems = false
@@ -371,6 +399,24 @@ struct ChapterReaderView: View {
             return
         }
         isLoading = false
+    }
+
+    private func uniqueSublayerNames(in detail: ChapterDetailResponse) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for layer in detail.chapterLayers {
+            for item in layer.chapterLayerItems {
+                for s in item.subLayerItems {
+                    let name = s.sublayerName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { continue }
+                    let key = name.lowercased()
+                    if seen.insert(key).inserted {
+                        out.append(name)
+                    }
+                }
+            }
+        }
+        return out
     }
 
     private static func pickDefaultLayer(from layers: [ChapterLayer]) -> ChapterLayer? {
@@ -534,8 +580,17 @@ private enum ReaderTopTab: String, CaseIterable, Identifiable {
 
 private struct ReaderTopTabs: View {
     @Binding var selected: ReaderTopTab
+    /// Hide Layers when the chapter has no `sub_layer_items`.
+    var showLayersTab: Bool
+    /// Unique `sublayer_name`s collected from the chapter payload.
+    var sublayerNames: [String] = []
+    @Binding var selectedSublayerName: String?
     /// When false, Quiz is hidden until prefetch finds at least one quiz with questions.
     var showQuizTab: Bool
+    /// Called when a tab is selected via user tap.
+    var onSelectTab: ((ReaderTopTab) -> Void)? = nil
+    /// Called when the user taps Record while it is already selected (e.g. toggle the controls row).
+    var onRetapRecord: (() -> Void)? = nil
     /// Called when the user taps Quiz while it is already selected (e.g. reopen after dismissing single-quiz sheet).
     var onRetapQuiz: (() -> Void)? = nil
     /// Exactly one playable quiz: Quiz tab stays filled with accent blue even when Layers/Record is selected.
@@ -543,32 +598,68 @@ private struct ReaderTopTabs: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var visibleTabs: [ReaderTopTab] {
-        showQuizTab ? [.layers, .record, .quiz] : [.layers, .record]
+        var tabs: [ReaderTopTab] = []
+        if showLayersTab { tabs.append(.layers) }
+        tabs.append(.record)
+        if showQuizTab { tabs.append(.quiz) }
+        return tabs
     }
 
     var body: some View {
-        HStack(spacing: 10) {
-            ForEach(visibleTabs, id: \.id) { tab in
-                Button {
-                    if tab == .quiz, selected == .quiz {
-                        onRetapQuiz?()
-                    } else {
-                        selected = tab
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                ForEach(visibleTabs, id: \.id) { tab in
+                    Button {
+                        if tab == .record, selected == .record {
+                            onRetapRecord?()
+                            return
+                        }
+                        if tab == .quiz, selected == .quiz {
+                            onRetapQuiz?()
+                        } else {
+                            selected = tab
+                            onSelectTab?(tab)
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: tab.systemImage)
+                                .imageScale(.medium)
+                            Text(tab.rawValue)
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                        .foregroundStyle(tabLabelForeground(tab))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(tabLabelBackground(tab))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: tab.systemImage)
-                            .imageScale(.medium)
-                        Text(tab.rawValue)
-                            .font(.system(size: 16, weight: .semibold))
-                    }
-                    .foregroundStyle(tabLabelForeground(tab))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(tabLabelBackground(tab))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+            }
+
+            if showLayersTab, !sublayerNames.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(sublayerNames, id: \.self) { name in
+                            Button {
+                                if selectedSublayerName == name {
+                                    selectedSublayerName = nil
+                                } else {
+                                    selectedSublayerName = name
+                                }
+                            } label: {
+                                Text(name)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(chipForeground(isSelected: selectedSublayerName == name))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(chipBackground(isSelected: selectedSublayerName == name))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
             }
         }
         .environment(\.layoutDirection, .leftToRight)
@@ -599,6 +690,16 @@ private struct ReaderTopTabs: View {
 
     private var inactiveTabBackground: Color {
         colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.6)
+    }
+
+    private func chipBackground(isSelected: Bool) -> Color {
+        if isSelected { return AppTheme.accentBlue }
+        return colorScheme == .dark ? Color.white.opacity(0.12) : Color.white.opacity(0.55)
+    }
+
+    private func chipForeground(isSelected: Bool) -> Color {
+        if isSelected { return .white }
+        return colorScheme == .dark ? Color.white.opacity(0.82) : AppTheme.textPrimary
     }
 }
 
@@ -2186,24 +2287,25 @@ private func groupedItems(_ items: [ChapterLayerItem]) -> [LayerItemGroup] {
 
 struct DefaultLayerContentView: View {
     let items: [ChapterLayerItem]
+    let sublayerSelection: String?
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         let groups = groupedItems(items)
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                 Group {
                     switch group {
                     case .inline(let parts):
-                        InlineLayerRow(items: parts)
+                        InlineLayerRow(items: parts, sublayerSelection: sublayerSelection)
                     case .single(let item):
-                        LayerSingleItemView(item: item)
+                        LayerSingleItemView(item: item, sublayerSelection: sublayerSelection)
                     }
                 }
                 // SwiftUI often skips updating the first row when font changes without a new identity;
                 // scope this to index 0 only so the rest of the chapter is not torn down on every tick.
-                .id(index == 0 ? "\(group.id)-fs-\(Int(appSettings.contentFontSize))" : group.id)
+                .id(index == 0 ? "\(group.id)-fs-\(Int(appSettings.contentFontSize))-sl-\(sublayerSelection ?? "_")" : group.id)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2215,15 +2317,19 @@ struct DefaultLayerContentView: View {
 
 private struct InlineLayerRow: View {
     let items: [ChapterLayerItem]
+    let sublayerSelection: String?
     @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         InlineFlowLayout(horizontalSpacing: 0, verticalSpacing: 0) {
             ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
-                HintToggleItem(hint: item.hint, mode: .inline) {
-                    InlineSegmentText(html: item.body, addTrailingSpace: idx != items.count - 1)
+                HintToggleItem(hint: item.resolvedHint(sublayerSelection: sublayerSelection), mode: .inline) {
+                    InlineSegmentText(
+                        html: item.resolvedBody(sublayerSelection: sublayerSelection),
+                        addTrailingSpace: idx != items.count - 1
+                    )
                 }
-                .id(idx == 0 ? "first-inline-\(item.id)-\(Int(appSettings.contentFontSize))" : "inline-\(item.id)")
+                .id(idx == 0 ? "first-inline-\(item.id)-\(Int(appSettings.contentFontSize))-sl-\(sublayerSelection ?? "_")" : "inline-\(item.id)")
             }
         }
         .padding(.vertical, 0)
@@ -2232,21 +2338,22 @@ private struct InlineLayerRow: View {
 
 private struct LayerSingleItemView: View {
     let item: ChapterLayerItem
+    let sublayerSelection: String?
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
-        HintToggleItem(hint: item.hint, mode: .block) {
+        HintToggleItem(hint: item.resolvedHint(sublayerSelection: sublayerSelection), mode: .block) {
             Group {
                 switch item.style {
                 case "header":
-                    ItemBodyText(html: item.body)
+                    ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                         .font(ArabicTypography.swiftUIFont(size: appSettings.contentFontSize).weight(.semibold))
                 case "block":
-                    ItemBodyText(html: item.body)
+                    ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                         .padding(.vertical, 6)
                 case "quote":
-                    ItemBodyText(html: item.body)
+                    ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2255,14 +2362,14 @@ private struct LayerSingleItemView: View {
                 case "bullet":
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("•")
-                        ItemBodyText(html: item.body)
+                        ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                     }
                     .padding(.vertical, 2)
                 case "ordered":
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("◦")
                             .foregroundStyle(Color.secondary)
-                        ItemBodyText(html: item.body)
+                        ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                     }
                     .padding(.vertical, 2)
                 case "line_break":
@@ -2270,9 +2377,9 @@ private struct LayerSingleItemView: View {
                 case "hr":
                     Divider().padding(.vertical, 12)
                 case "inline":
-                    ItemBodyText(html: item.body)
+                    ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                 default:
-                    ItemBodyText(html: item.body)
+                    ItemBodyText(html: item.resolvedBody(sublayerSelection: sublayerSelection))
                         .padding(.vertical, 4)
                 }
             }
@@ -2392,12 +2499,39 @@ private struct InlineSegmentText: View {
     let html: String
     let addTrailingSpace: Bool
     @EnvironmentObject private var appSettings: AppSettings
+    @State private var rendered: AttributedString?
+    @State private var renderTask: Task<Void, Never>?
 
     var body: some View {
-        let attributed = ItemBodyText.attributed(from: html, fontSize: appSettings.contentFontSize)
-        Text(attributedWithOptionalSpace(attributed))
+        Text(attributedWithOptionalSpace(rendered ?? AttributedString(HTMLPlainText.from(html))))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
+            .task(id: renderKey) {
+                renderTask?.cancel()
+                let htmlCopy = html
+                let fontSize = appSettings.contentFontSize
+                let key = renderKey
+                renderTask = Task.detached(priority: .userInitiated) {
+                    await HTMLParseLimiter.shared.wait()
+                    defer { Task { await HTMLParseLimiter.shared.signal() } }
+                    let parsed = ItemBodyText.attributed(from: htmlCopy, fontSize: fontSize)
+                    if Task.isCancelled { return }
+                    await MainActor.run {
+                        if self.renderKey == key {
+                            self.rendered = parsed
+                        }
+                    }
+                }
+                await renderTask?.value
+            }
+            .onDisappear {
+                renderTask?.cancel()
+                renderTask = nil
+            }
+    }
+
+    private var renderKey: String {
+        "\(html.hashValue)-\(Int(appSettings.contentFontSize))"
     }
 
     private func attributedWithOptionalSpace(_ base: AttributedString) -> AttributedString {
@@ -2550,14 +2684,89 @@ private struct InlineFlowLayout: Layout {
 
 // MARK: - HTML → AttributedString
 
+/// Limits concurrent HTML parsing so font changes don’t spike CPU and block navigation.
+private actor HTMLParseLimiter {
+    static let shared = HTMLParseLimiter(value: 2)
+    private var value: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(value: Int) {
+        self.value = max(1, value)
+    }
+
+    func wait() async {
+        if value > 0 {
+            value -= 1
+            return
+        }
+        await withCheckedContinuation { cont in
+            waiters.append(cont)
+        }
+    }
+
+    func signal() {
+        if !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            next.resume()
+        } else {
+            value += 1
+        }
+    }
+}
+
+private enum HTMLPlainText {
+    static func from(_ html: String) -> String {
+        if html.isEmpty { return "" }
+        var s = html
+        s = s.replacingOccurrences(of: "<br\\s*/?>", with: "\n", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: "</p\\s*>", with: "\n\n", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: "<[^>]+>", with: "", options: [.regularExpression])
+        s = s.replacingOccurrences(of: "&nbsp;", with: " ", options: [.caseInsensitive])
+        s = s.replacingOccurrences(of: "&amp;", with: "&", options: [.caseInsensitive])
+        s = s.replacingOccurrences(of: "&lt;", with: "<", options: [.caseInsensitive])
+        s = s.replacingOccurrences(of: "&gt;", with: ">", options: [.caseInsensitive])
+        s = s.replacingOccurrences(of: "&quot;", with: "\"", options: [.caseInsensitive])
+        s = s.replacingOccurrences(of: "&#39;", with: "'", options: [.caseInsensitive])
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 struct ItemBodyText: View {
     let html: String
     @EnvironmentObject private var appSettings: AppSettings
+    @State private var rendered: AttributedString?
+    @State private var renderTask: Task<Void, Never>?
 
     var body: some View {
-        Text(Self.attributed(from: html, fontSize: appSettings.contentFontSize))
+        Text(rendered ?? AttributedString(HTMLPlainText.from(html)))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
+            .task(id: renderKey) {
+                renderTask?.cancel()
+                let htmlCopy = html
+                let fontSize = appSettings.contentFontSize
+                let key = renderKey
+                renderTask = Task.detached(priority: .userInitiated) {
+                    await HTMLParseLimiter.shared.wait()
+                    defer { Task { await HTMLParseLimiter.shared.signal() } }
+                    let parsed = Self.attributed(from: htmlCopy, fontSize: fontSize)
+                    if Task.isCancelled { return }
+                    await MainActor.run {
+                        if self.renderKey == key {
+                            self.rendered = parsed
+                        }
+                    }
+                }
+                await renderTask?.value
+            }
+            .onDisappear {
+                renderTask?.cancel()
+                renderTask = nil
+            }
+    }
+
+    private var renderKey: String {
+        "\(html.hashValue)-\(Int(appSettings.contentFontSize))"
     }
 
     /// Parsed + resized HTML is expensive; cache by string identity and point size (pt slider is stepped).
