@@ -21,8 +21,11 @@ struct ChapterReaderView: View {
     @State private var layerQuizzes: [LayerQuiz] = []
     @State private var quizzesLoading = false
     @State private var quizzesErrorMessage: String?
+    /// True after we finish fetching quizzes for the current chapter’s default layer (success or failure).
+    @State private var quizzesFetchCompleted = false
     @State private var activeQuiz: LayerQuiz?
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.contentFontBarDismiss) private var contentFontBarDismiss
     @State private var isLoadingMoreItems = false
     @EnvironmentObject private var subscriptionStore: SubscriptionStore
     @State private var paywallPresented = false
@@ -52,7 +55,12 @@ struct ChapterReaderView: View {
                     premiumLockedScreen()
                 } else {
                     VStack(spacing: 0) {
-                        ReaderTopTabs(selected: $topTab)
+                        ReaderTopTabs(
+                            selected: $topTab,
+                            showQuizTab: showQuizTab,
+                            onRetapQuiz: handleQuizTabRetap,
+                            quizAlwaysAccentWhenSingle: playableQuizCount == 1 && showQuizTab
+                        )
                             .padding(.horizontal, 12)
                             .padding(.vertical, 10)
                             .background(topTabsBackground)
@@ -78,7 +86,7 @@ struct ChapterReaderView: View {
                                     .padding(.horizontal, 12)
                                     .padding(.bottom, 6)
                             }
-                        } else if topTab == .quiz {
+                        } else if topTab == .quiz, showQuizSubcontrolsRow {
                             QuizControlsRow(
                                 isLoading: quizzesLoading,
                                 hasQuiz: quizHasQuestions,
@@ -95,6 +103,9 @@ struct ChapterReaderView: View {
                         chapterBodyContent(detail)
                             .environment(\.layoutDirection, contentLayoutDirection(for: detail.language))
                             .padding(.top, 4)
+                            .simultaneousGesture(
+                                TapGesture().onEnded { contentFontBarDismiss?() }
+                            )
                     }
                 }
             } else {
@@ -138,8 +149,55 @@ struct ChapterReaderView: View {
         }
         .onChange(of: topTab) { _, newTab in
             guard newTab == .quiz else { return }
-            Task { await loadQuizzesForDefaultLayerIfNeeded() }
+            Task {
+                await loadQuizzesForDefaultLayerIfNeeded()
+                await MainActor.run {
+                    tryAutoStartSingleQuizAfterLoad()
+                }
+            }
         }
+        .onChange(of: quizHasQuestions) { _, _ in
+            if quizzesFetchCompleted, !quizHasQuestions, topTab == .quiz {
+                topTab = .layers
+            }
+        }
+        .onChange(of: quizzesFetchCompleted) { _, done in
+            if done, !quizHasQuestions, topTab == .quiz {
+                topTab = .layers
+            }
+        }
+    }
+
+    /// Quiz tab only after prefetch finishes and at least one quiz has questions.
+    private var showQuizTab: Bool {
+        quizzesFetchCompleted && quizHasQuestions
+    }
+
+    /// Single playable quiz: never show the secondary row (even after closing the sheet). Multiple quizzes, loading, or no questions yet: show row.
+    private var showQuizSubcontrolsRow: Bool {
+        if quizzesLoading { return true }
+        if !quizHasQuestions { return true }
+        if playableQuizCount > 1 { return true }
+        return false
+    }
+
+    /// Single-quiz chapters: tapping the already-selected Quiz tab reopens the sheet (no Start Quiz row).
+    private func handleQuizTabRetap() {
+        guard playableQuizCount == 1 else { return }
+        startQuizIfAvailable()
+    }
+
+    private var playableQuizCount: Int {
+        layerQuizzes.filter { !$0.layerQuizQuestions.isEmpty }.count
+    }
+
+    private func tryAutoStartSingleQuizAfterLoad() {
+        guard topTab == .quiz else { return }
+        guard !quizzesLoading else { return }
+        guard quizHasQuestions else { return }
+        guard playableQuizCount == 1 else { return }
+        guard activeQuiz == nil else { return }
+        startQuizIfAvailable()
     }
 
     private func shouldGatePremiumContent(_ detail: ChapterDetailResponse) -> Bool {
@@ -259,6 +317,11 @@ struct ChapterReaderView: View {
         isLoading = true
         isLoadingMoreItems = false
         loadError = nil
+        layerQuizzes = []
+        quizzesFetchCompleted = false
+        quizzesErrorMessage = nil
+        quizzesLoading = false
+        activeQuiz = nil
         do {
             let firstPageSize = 40
             var merged = try await ChapterAPI.fetchChapterDetail(
@@ -268,6 +331,13 @@ struct ChapterReaderView: View {
             )
             detail = merged
             isLoading = false
+
+            Task {
+                await loadQuizzesForDefaultLayerIfNeeded()
+                await MainActor.run {
+                    tryAutoStartSingleQuizAfterLoad()
+                }
+            }
 
             // Continue paging in background for heavy chapters.
             isLoadingMoreItems = true
@@ -390,8 +460,16 @@ struct ChapterReaderView: View {
     }
 
     private func loadQuizzesForDefaultLayerIfNeeded() async {
-        guard let detail else { return }
-        guard let layer = Self.pickDefaultLayer(from: detail.chapterLayers) else { return }
+        defer { quizzesFetchCompleted = true }
+
+        guard let detail else {
+            layerQuizzes = []
+            return
+        }
+        guard let layer = Self.pickDefaultLayer(from: detail.chapterLayers) else {
+            layerQuizzes = []
+            return
+        }
         // If we've already loaded for this layer, keep the existing state.
         if layerQuizzes.first?.chapterLayerId == layer.id { return }
 
@@ -414,6 +492,7 @@ struct ChapterReaderView: View {
     }
 
     private func startQuizIfAvailable() {
+        guard activeQuiz == nil else { return }
         guard quizHasQuestions else {
             quizzesErrorMessage = "No quiz available"
             return
@@ -455,13 +534,27 @@ private enum ReaderTopTab: String, CaseIterable, Identifiable {
 
 private struct ReaderTopTabs: View {
     @Binding var selected: ReaderTopTab
+    /// When false, Quiz is hidden until prefetch finds at least one quiz with questions.
+    var showQuizTab: Bool
+    /// Called when the user taps Quiz while it is already selected (e.g. reopen after dismissing single-quiz sheet).
+    var onRetapQuiz: (() -> Void)? = nil
+    /// Exactly one playable quiz: Quiz tab stays filled with accent blue even when Layers/Record is selected.
+    var quizAlwaysAccentWhenSingle: Bool = false
     @Environment(\.colorScheme) private var colorScheme
+
+    private var visibleTabs: [ReaderTopTab] {
+        showQuizTab ? [.layers, .record, .quiz] : [.layers, .record]
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            ForEach(ReaderTopTab.allCases) { tab in
+            ForEach(visibleTabs, id: \.id) { tab in
                 Button {
-                    selected = tab
+                    if tab == .quiz, selected == .quiz {
+                        onRetapQuiz?()
+                    } else {
+                        selected = tab
+                    }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: tab.systemImage)
@@ -469,10 +562,10 @@ private struct ReaderTopTabs: View {
                         Text(tab.rawValue)
                             .font(.system(size: 16, weight: .semibold))
                     }
-                    .foregroundStyle(isActive(tab) ? Color.white : AppTheme.textPrimary)
+                    .foregroundStyle(tabLabelForeground(tab))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
-                    .background(isActive(tab) ? AppTheme.forestGreen : inactiveTabBackground)
+                    .background(tabLabelBackground(tab))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
@@ -482,6 +575,27 @@ private struct ReaderTopTabs: View {
     }
 
     private func isActive(_ tab: ReaderTopTab) -> Bool { selected == tab }
+
+    private func quizUsesPersistentAccent(_ tab: ReaderTopTab) -> Bool {
+        tab == .quiz && quizAlwaysAccentWhenSingle
+    }
+
+    private func tabLabelForeground(_ tab: ReaderTopTab) -> Color {
+        if quizUsesPersistentAccent(tab) || isActive(tab) {
+            return .white
+        }
+        return AppTheme.textPrimary
+    }
+
+    private func tabLabelBackground(_ tab: ReaderTopTab) -> Color {
+        if quizUsesPersistentAccent(tab) {
+            return AppTheme.accentBlue
+        }
+        if isActive(tab) {
+            return AppTheme.forestGreen
+        }
+        return inactiveTabBackground
+    }
 
     private var inactiveTabBackground: Color {
         colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.6)
@@ -713,11 +827,11 @@ private struct QuizModalView: View {
     @State private var reveal: Bool = false
     @State private var shuffledAnswersByQuestionID: [Int: [LayerItemQuizAnswer]] = [:]
     @State private var shuffledQuestions: [LayerQuizQuestion] = []
+    /// 0…1 while auto-advancing after Check (non-final questions only).
+    @State private var autoAdvanceProgress: CGFloat = 0
+    @State private var autoAdvanceTask: Task<Void, Never>?
 
-    private var questions: [LayerQuizQuestion] {
-        if !shuffledQuestions.isEmpty { return shuffledQuestions }
-        return sortedQuestions
-    }
+    private var questions: [LayerQuizQuestion] { shuffledQuestions }
 
     private func answers(for q: LayerQuizQuestion) -> [LayerItemQuizAnswer] {
         if let shuffled = shuffledAnswersByQuestionID[q.id] {
@@ -743,11 +857,38 @@ private struct QuizModalView: View {
 
     private var isLast: Bool { index >= max(0, questions.count - 1) }
 
+    /// Randomize question order and per-question answer order together (Restart uses this too).
+    private func applyNewShuffle() {
+        let base = sortedQuestions
+        guard !base.isEmpty else {
+            shuffledQuestions = []
+            shuffledAnswersByQuestionID = [:]
+            return
+        }
+        let qShuffled = base.shuffled()
+        shuffledQuestions = qShuffled
+        var dict: [Int: [LayerItemQuizAnswer]] = [:]
+        for q in qShuffled {
+            let sorted = q.layerItemQuizAnswers.sorted {
+                let lp = $0.position ?? Int.max
+                let rp = $1.position ?? Int.max
+                if lp != rp { return lp < rp }
+                return $0.id < $1.id
+            }
+            dict[q.id] = sorted.shuffled()
+        }
+        shuffledAnswersByQuestionID = dict
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if questions.isEmpty {
+                if sortedQuestions.isEmpty {
                     ContentUnavailableView("No quiz available", systemImage: "questionmark.circle")
+                } else if shuffledQuestions.isEmpty {
+                    ProgressView("Preparing quiz…")
+                        .tint(AppTheme.forestGreen)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     let q = questions[min(index, questions.count - 1)]
                     ScrollView {
@@ -793,24 +934,61 @@ private struct QuizModalView: View {
         .environment(\.layoutDirection, .rightToLeft)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-        .task {
-            // Shuffle questions + choices once per modal presentation and keep stable.
-            if !shuffledQuestions.isEmpty, !shuffledAnswersByQuestionID.isEmpty { return }
-            if shuffledQuestions.isEmpty {
-                shuffledQuestions = sortedQuestions.shuffled()
-            }
-            var dict: [Int: [LayerItemQuizAnswer]] = [:]
-            for q in shuffledQuestions {
-                let sorted = q.layerItemQuizAnswers.sorted {
-                    let lp = $0.position ?? Int.max
-                    let rp = $1.position ?? Int.max
-                    if lp != rp { return lp < rp }
-                    return $0.id < $1.id
-                }
-                dict[q.id] = sorted.shuffled()
-            }
-            shuffledAnswersByQuestionID = dict
+        .task(id: quiz.id) {
+            applyNewShuffle()
         }
+        .onChange(of: reveal) { _, newReveal in
+            if newReveal, !isLast {
+                startAutoAdvanceToNextQuestion()
+            } else if !newReveal {
+                cancelAutoAdvanceTimer()
+            }
+        }
+        .onDisappear {
+            cancelAutoAdvanceTimer()
+        }
+    }
+
+    private static let autoAdvanceSeconds: Double = 3
+
+    private func cancelAutoAdvanceTimer() {
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = nil
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            autoAdvanceProgress = 0
+        }
+    }
+
+    private func startAutoAdvanceToNextQuestion() {
+        cancelAutoAdvanceTimer()
+        guard !isLast else { return }
+        autoAdvanceProgress = 0
+        let duration = Self.autoAdvanceSeconds
+        autoAdvanceTask = Task { @MainActor in
+            withAnimation(.linear(duration: duration)) {
+                autoAdvanceProgress = 1
+            }
+            let nanos = UInt64(duration * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            guard !Task.isCancelled else { return }
+            index += 1
+            reveal = false
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                autoAdvanceProgress = 0
+            }
+            autoAdvanceTask = nil
+        }
+    }
+
+    private func skipAutoAdvanceToNextQuestion() {
+        cancelAutoAdvanceTimer()
+        guard !isLast else { return }
+        index += 1
+        reveal = false
     }
 
     @ViewBuilder
@@ -830,12 +1008,11 @@ private struct QuizModalView: View {
 
                 HStack(spacing: 10) {
                     Button {
-                        // restart
+                        cancelAutoAdvanceTimer()
                         index = 0
                         selectedAnswerIDByQuestionID = [:]
                         reveal = false
-                        // Re-shuffle on restart for a fresh attempt.
-                        shuffledAnswersByQuestionID = [:]
+                        applyNewShuffle()
                     } label: {
                         Text("Restart")
                             .font(.system(size: 16, weight: .semibold))
@@ -846,32 +1023,85 @@ private struct QuizModalView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Button {
-                        if !reveal {
-                            reveal = true
-                            return
+                    if reveal, !isLast {
+                        quizAutoAdvanceBar
+                    } else {
+                        Button {
+                            if !reveal {
+                                reveal = true
+                                return
+                            }
+                            if isLast {
+                                return
+                            }
+                            index += 1
+                            reveal = false
+                        } label: {
+                            Text(isLast ? (reveal ? "Done" : "Check") : "Check")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(Color.white)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background((selected == nil) ? Color.gray.opacity(0.4) : AppTheme.forestGreen)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        // Next / Finish
-                        if isLast {
-                            return
-                        }
-                        index += 1
-                        reveal = false
-                    } label: {
-                        Text(isLast ? (reveal ? "Done" : "Check") : (reveal ? "Next" : "Check"))
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .background((selected == nil) ? Color.gray.opacity(0.4) : AppTheme.forestGreen)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .buttonStyle(.plain)
+                        .disabled(selected == nil)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(selected == nil)
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
         }
+    }
+
+    /// Fills left → right over `autoAdvanceSeconds`; tap to skip wait.
+    private var quizAutoAdvanceBar: some View {
+        VStack(spacing: 8) {
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+                    .frame(height: 10)
+                GeometryReader { geo in
+                    let w = max(0, geo.size.width * autoAdvanceProgress)
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    AppTheme.forestGreen.opacity(0.92),
+                                    AppTheme.forestGreen,
+                                    Color(red: 0.35, green: 0.78, blue: 0.52)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(10, w))
+                        .shadow(color: AppTheme.forestGreen.opacity(colorScheme == .dark ? 0.45 : 0.25), radius: 6, x: 0, y: 0)
+                }
+                .frame(height: 10)
+                .allowsHitTesting(false)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 10)
+            .environment(\.layoutDirection, .leftToRight)
+            .contentShape(Rectangle())
+            .padding(.vertical, 17)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(AppTheme.forestGreen.opacity(colorScheme == .dark ? 0.22 : 0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(AppTheme.forestGreen.opacity(0.35), lineWidth: 1)
+            )
+            .onTapGesture { skipAutoAdvanceToNextQuestion() }
+
+            Text("Next question — tap to skip")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color.secondary)
+                .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, minHeight: 44)
     }
 
     @ViewBuilder
@@ -1960,27 +2190,32 @@ struct DefaultLayerContentView: View {
     @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
+        let groups = groupedItems(items)
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(groupedItems(items)) { group in
-                switch group {
-                case .inline(let parts):
-                    InlineLayerRow(items: parts)
-                case .single(let item):
-                    LayerSingleItemView(item: item)
+            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                Group {
+                    switch group {
+                    case .inline(let parts):
+                        InlineLayerRow(items: parts)
+                    case .single(let item):
+                        LayerSingleItemView(item: item)
+                    }
                 }
+                // SwiftUI often skips updating the first row when font changes without a new identity;
+                // scope this to index 0 only so the rest of the chapter is not torn down on every tick.
+                .id(index == 0 ? "\(group.id)-fs-\(Int(appSettings.contentFontSize))" : group.id)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(ArabicTypography.swiftUIFont(size: appSettings.contentFontSize))
         .lineSpacing(10)
         .foregroundStyle(colorScheme == .dark ? Color.white : AppTheme.textPrimary)
-        // ScrollView + attributed text can leave the first row’s layout stale until re-navigation; font-scoped id forces a fresh pass.
-        .id(appSettings.contentFontSize)
     }
 }
 
 private struct InlineLayerRow: View {
     let items: [ChapterLayerItem]
+    @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         InlineFlowLayout(horizontalSpacing: 0, verticalSpacing: 0) {
@@ -1988,6 +2223,7 @@ private struct InlineLayerRow: View {
                 HintToggleItem(hint: item.hint, mode: .inline) {
                     InlineSegmentText(html: item.body, addTrailingSpace: idx != items.count - 1)
                 }
+                .id(idx == 0 ? "first-inline-\(item.id)-\(Int(appSettings.contentFontSize))" : "inline-\(item.id)")
             }
         }
         .padding(.vertical, 0)
@@ -2162,7 +2398,6 @@ private struct InlineSegmentText: View {
         Text(attributedWithOptionalSpace(attributed))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .id(appSettings.contentFontSize)
     }
 
     private func attributedWithOptionalSpace(_ base: AttributedString) -> AttributedString {
@@ -2323,10 +2558,25 @@ struct ItemBodyText: View {
         Text(Self.attributed(from: html, fontSize: appSettings.contentFontSize))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .id(appSettings.contentFontSize)
+    }
+
+    /// Parsed + resized HTML is expensive; cache by string identity and point size (pt slider is stepped).
+    private static let attributedCache: NSCache<NSString, NSAttributedString> = {
+        let c = NSCache<NSString, NSAttributedString>()
+        c.countLimit = 180
+        return c
+    }()
+
+    private static func cacheKey(html: String, fontSize: CGFloat) -> NSString {
+        // hashValue is sufficient for UI cache keys; collisions only risk wrong glyph size until scroll.
+        "\(html.hashValue)_\(Int(fontSize))" as NSString
     }
 
     static func attributed(from html: String, fontSize: CGFloat = 30) -> AttributedString {
+        let key = cacheKey(html: html, fontSize: fontSize)
+        if let cached = attributedCache.object(forKey: key) {
+            return AttributedString(cached)
+        }
         guard let data = html.data(using: .utf8) else { return AttributedString(html) }
         let opts: [NSAttributedString.DocumentReadingOptionKey: Any] = [
             .documentType: NSAttributedString.DocumentType.html,
@@ -2346,6 +2596,8 @@ struct ItemBodyText: View {
             }
             mutable.addAttribute(.foregroundColor, value: UIColor.label, range: full)
 
+            let copyForCache = mutable.copy() as! NSAttributedString
+            attributedCache.setObject(copyForCache, forKey: key, cost: copyForCache.length)
             return AttributedString(mutable)
         }
         return AttributedString(html)

@@ -1,6 +1,20 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Content font bar dismiss (tap chapter body to finish adjusting size)
+
+private struct ContentFontBarDismissKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    /// When non-nil, chapter body may call this on tap to dismiss the top font-size bar.
+    var contentFontBarDismiss: (() -> Void)? {
+        get { self[ContentFontBarDismissKey.self] }
+        set { self[ContentFontBarDismissKey.self] = newValue }
+    }
+}
+
 /// Compact two-line nav bar title: optional ancestor trail + current title (RTL-friendly).
 struct NavBarBreadcrumbTitle: View {
     let ancestors: [String]
@@ -40,6 +54,7 @@ private struct ConditionalBreadcrumbNavModifier: ViewModifier {
     @EnvironmentObject private var appSettings: AppSettings
     @Environment(\.colorScheme) private var colorScheme
     @State private var isSettingsOpen = false
+    @State private var isContentFontBarVisible = false
 
     func body(content: Content) -> some View {
         content
@@ -47,6 +62,14 @@ private struct ConditionalBreadcrumbNavModifier: ViewModifier {
             // while the principal toolbar title view lays out.
             .navigationTitle(title.isEmpty ? " " : title)
             .navigationBarTitleDisplayMode(.inline)
+            .environment(\.contentFontBarDismiss, contentFontBarDismissAction)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if isContentFontBarVisible {
+                    ContentFontSizeTopBar(appSettings: appSettings, onDone: dismissContentFontBar)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.26, dampingFraction: 0.9), value: isContentFontBarVisible)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     NavBarBreadcrumbTitle(ancestors: ancestors, title: title)
@@ -81,8 +104,9 @@ private struct ConditionalBreadcrumbNavModifier: ViewModifier {
             }
             .overlay {
                 if isSettingsOpen {
+                    // TOC / books use RTL; without LTR here, `.trailing` becomes the physical left and the sheet opens on the wrong side.
                     ZStack(alignment: .trailing) {
-                        Color.black.opacity(0.18)
+                        Color.black.opacity(colorScheme == .dark ? 0.32 : 0.12)
                             .ignoresSafeArea()
                             .onTapGesture {
                                 withAnimation(.spring(response: 0.24, dampingFraction: 0.92)) {
@@ -90,9 +114,14 @@ private struct ConditionalBreadcrumbNavModifier: ViewModifier {
                                 }
                             }
 
-                        ReaderSettingsPanel(appSettings: appSettings, onClose: {
+                        ReaderSettingsPanel(onClose: {
                             withAnimation(.spring(response: 0.24, dampingFraction: 0.92)) {
                                 isSettingsOpen = false
+                            }
+                        }, onOpenFontSize: {
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.92)) {
+                                isSettingsOpen = false
+                                isContentFontBarVisible = true
                             }
                         })
                         .frame(width: 320)
@@ -100,10 +129,23 @@ private struct ConditionalBreadcrumbNavModifier: ViewModifier {
                         .frame(maxHeight: .infinity, alignment: .top)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
+                    .environment(\.layoutDirection, .leftToRight)
                     .animation(.spring(response: 0.26, dampingFraction: 0.9), value: isSettingsOpen)
                     .zIndex(1000)
                 }
             }
+    }
+
+    private var contentFontBarDismissAction: (() -> Void)? {
+        isContentFontBarVisible
+            ? { dismissContentFontBar() }
+            : nil
+    }
+
+    private func dismissContentFontBar() {
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.92)) {
+            isContentFontBarVisible = false
+        }
     }
 
     private var navBarBackground: Color {
@@ -112,8 +154,8 @@ private struct ConditionalBreadcrumbNavModifier: ViewModifier {
 }
 
 private struct ReaderSettingsPanel: View {
-    @ObservedObject var appSettings: AppSettings
     let onClose: () -> Void
+    let onOpenFontSize: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -130,49 +172,145 @@ private struct ReaderSettingsPanel: View {
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(colorScheme == .dark ? Color.white : AppTheme.textPrimary)
                         .frame(width: 28, height: 28)
-                        .background(colorScheme == .dark ? Color.white.opacity(0.15) : Color.white.opacity(0.9))
+                        .background(colorScheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.9))
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Content Font Size")
+            Button {
+                onOpenFontSize()
+            } label: {
+                Text("Change font size…")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(colorScheme == .dark ? Color.white : AppTheme.textPrimary)
-
-                HStack(spacing: 12) {
-                    Text("A")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.72) : AppTheme.textSecondary)
-
-                    Slider(
-                        value: $appSettings.contentFontSize,
-                        in: appSettings.contentFontRange,
-                        step: 1
-                    )
-
-                    Text("A")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.72) : AppTheme.textSecondary)
-                }
-
-                Text("\(Int(appSettings.contentFontSize)) pt")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.72) : AppTheme.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.88))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+            .buttonStyle(.plain)
 
             Spacer(minLength: 0)
         }
         .padding(16)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(colorScheme == .dark ? Color(white: 0.12) : AppTheme.bannerPink.opacity(0.98))
+        .background(colorScheme == .dark ? Color(white: 0.14) : AppTheme.bannerPink.opacity(0.98))
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.08))
                 .frame(width: 1)
         }
-        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.12), radius: 10, x: -2, y: 0)
+        // Panel is anchored to the physical right (LTR overlay); shadow falls left onto the dimmed content.
+        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.12), radius: 10, x: -4, y: 0)
+    }
+}
+
+private struct ContentFontSizeTopBar: View {
+    @ObservedObject var appSettings: AppSettings
+    let onDone: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Slider uses local state so the thumb stays fluid; chapter text updates are throttled to avoid heavy HTML/layout churn.
+    @State private var draftFontSize: CGFloat = 30
+    @State private var throttleTask: Task<Void, Never>?
+    @State private var lastCommittedAt: CFAbsoluteTime = 0
+
+    /// Minimum time between applying size to `AppSettings` (limits attributed-text rebuilds per second).
+    private static let applyThrottleSeconds: Double = 0.11
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("A")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.85) : AppTheme.textSecondary)
+
+                Slider(
+                    value: $draftFontSize,
+                    in: appSettings.contentFontRange,
+                    step: 1
+                )
+                .tint(AppTheme.forestGreen)
+
+                Text("A")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.85) : AppTheme.textSecondary)
+
+                Button {
+                    flushFontSizeToAppSettings()
+                    onDone()
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 28))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(AppTheme.forestGreen)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Save and close font size")
+            }
+
+            Text("\(Int(draftFontSize)) pt")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.75) : AppTheme.textSecondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            ZStack {
+                Rectangle()
+                    .fill(colorScheme == .dark ? Color(white: 0.11) : AppTheme.bannerPink.opacity(0.96))
+                Rectangle()
+                    .fill(colorScheme == .dark ? Color.black.opacity(0.2) : Color.white.opacity(0.08))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+                .frame(height: 1)
+        }
+        // Books/TOC use RTL; chapter content uses RTL but this inset follows system LTR. Force LTR so the
+        // slider (small A → large A, fill growing left-to-right) matches the chapter reader everywhere.
+        .environment(\.layoutDirection, .leftToRight)
+        .onAppear {
+            draftFontSize = appSettings.contentFontSize
+            lastCommittedAt = CFAbsoluteTimeGetCurrent()
+        }
+        .onChange(of: draftFontSize) { _, _ in
+            scheduleThrottledApplyToAppSettings()
+        }
+        .onDisappear {
+            flushFontSizeToAppSettings()
+        }
+    }
+
+    private func scheduleThrottledApplyToAppSettings() {
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastCommittedAt >= Self.applyThrottleSeconds {
+            lastCommittedAt = now
+            appSettings.contentFontSize = draftFontSize
+            throttleTask?.cancel()
+            throttleTask = nil
+            return
+        }
+        throttleTask?.cancel()
+        throttleTask = Task { @MainActor in
+            let elapsed = CFAbsoluteTimeGetCurrent() - lastCommittedAt
+            let wait = max(0, Self.applyThrottleSeconds - elapsed)
+            if wait > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            lastCommittedAt = CFAbsoluteTimeGetCurrent()
+            appSettings.contentFontSize = draftFontSize
+        }
+    }
+
+    private func flushFontSizeToAppSettings() {
+        throttleTask?.cancel()
+        throttleTask = nil
+        appSettings.contentFontSize = draftFontSize
     }
 }
 

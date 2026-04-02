@@ -1,22 +1,16 @@
 import SwiftUI
 import UIKit
 
-private enum ChapterSelectionTypography {
-    /// Primary line: book / chapter title (all selection lists).
-    static var titleSize: CGFloat {
-        UIFont.preferredFont(forTextStyle: .largeTitle).pointSize
-    }
-
-    /// Secondary line: description when present.
-    static var subtitleSize: CGFloat {
-        UIFont.preferredFont(forTextStyle: .title2).pointSize
-    }
+/// Secondary line under TOC titles; scales with content font but stays readable.
+private func tocSubtitleFontSize(for contentPt: CGFloat) -> CGFloat {
+    max(14, min(38, contentPt * 0.78))
 }
 
 struct BooksRootView: View {
     @State private var books: [ChapterNode] = []
     @State private var loadState: LoadState = .idle
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appSettings: AppSettings
 
     private enum LoadState {
         case idle
@@ -45,7 +39,14 @@ struct BooksRootView: View {
                         NavigationLink {
                             ChapterTOCView(node: book)
                         } label: {
-                            selectionRow(title: book.title, description: book.description, tier: book.tier, colorScheme: colorScheme)
+                            selectionRow(
+                                title: book.title,
+                                description: book.description,
+                                tier: book.tier,
+                                colorScheme: colorScheme,
+                                titleFontSize: appSettings.contentFontSize,
+                                subtitleFontSize: tocSubtitleFontSize(for: appSettings.contentFontSize)
+                            )
                         }
                         .listRowBackground(listRowBackground)
                     }
@@ -90,6 +91,7 @@ struct ChapterTOCView: View {
     /// Titles from the root book down through each nested TOC parent (excludes `node`).
     var ancestorTitles: [String] = []
     @EnvironmentObject private var subscriptionStore: SubscriptionStore
+    @EnvironmentObject private var appSettings: AppSettings
     @Environment(\.colorScheme) private var colorScheme
     @State private var paywallPresented = false
 
@@ -113,7 +115,14 @@ struct ChapterTOCView: View {
                                 Button {
                                     paywallPresented = true
                                 } label: {
-                                    selectionRow(title: child.title, description: child.description, tier: child.tier, colorScheme: colorScheme)
+                                    selectionRow(
+                                        title: child.title,
+                                        description: child.description,
+                                        tier: child.tier,
+                                        colorScheme: colorScheme,
+                                        titleFontSize: appSettings.contentFontSize,
+                                        subtitleFontSize: tocSubtitleFontSize(for: appSettings.contentFontSize)
+                                    )
                                 }
                                 .buttonStyle(.plain)
                             } else {
@@ -124,14 +133,28 @@ struct ChapterTOCView: View {
                                         listContextTitle: child.title
                                     )
                                 } label: {
-                                    selectionRow(title: child.title, description: child.description, tier: child.tier, colorScheme: colorScheme)
+                                    selectionRow(
+                                        title: child.title,
+                                        description: child.description,
+                                        tier: child.tier,
+                                        colorScheme: colorScheme,
+                                        titleFontSize: appSettings.contentFontSize,
+                                        subtitleFontSize: tocSubtitleFontSize(for: appSettings.contentFontSize)
+                                    )
                                 }
                             }
                         } else {
                             NavigationLink {
                                 ChapterTOCView(node: child, ancestorTitles: ancestorTitles + [node.title])
                             } label: {
-                                selectionRow(title: child.title, description: child.description, tier: child.tier, colorScheme: colorScheme)
+                                selectionRow(
+                                    title: child.title,
+                                    description: child.description,
+                                    tier: child.tier,
+                                    colorScheme: colorScheme,
+                                    titleFontSize: appSettings.contentFontSize,
+                                    subtitleFontSize: tocSubtitleFontSize(for: appSettings.contentFontSize)
+                                )
                             }
                         }
                     }
@@ -161,14 +184,21 @@ struct ChapterTOCView: View {
 }
 
 // Shared row for books list and every TOC level.
-private func selectionRow(title: String, description: String?, tier: String?, colorScheme: ColorScheme) -> some View {
+private func selectionRow(
+    title: String,
+    description: String?,
+    tier: String?,
+    colorScheme: ColorScheme,
+    titleFontSize: CGFloat,
+    subtitleFontSize: CGFloat
+) -> some View {
     ZStack(alignment: .trailing) {
         VStack(alignment: .trailing, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Spacer(minLength: 0)
                 TierPill(tier: tier, colorScheme: colorScheme)
                 Text(title)
-                    .font(ArabicTypography.swiftUIFont(size: ChapterSelectionTypography.titleSize))
+                    .font(ArabicTypography.swiftUIFont(size: titleFontSize))
                     .foregroundStyle(colorScheme == .dark ? Color.white : AppTheme.textPrimary)
                     .multilineTextAlignment(.trailing)
                     .lineLimit(4)
@@ -176,7 +206,7 @@ private func selectionRow(title: String, description: String?, tier: String?, co
             }
             if let d = description, !d.isEmpty {
                 Text(d)
-                    .font(ArabicTypography.swiftUIFont(size: ChapterSelectionTypography.subtitleSize))
+                    .font(ArabicTypography.swiftUIFont(size: subtitleFontSize))
                     .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.72) : AppTheme.textSecondary)
                     .multilineTextAlignment(.trailing)
                     .lineLimit(4)
