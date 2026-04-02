@@ -5,5 +5,5 @@ import Combine
 final class AppSettings: ObservableObject {
     @Published var contentFontSize: CGFloat = 30
 
-    let contentFontRange: ClosedRange<CGFloat> = 20 ... 44
+    let contentFontRange: ClosedRange<CGFloat> = 24 ... 72
 }
