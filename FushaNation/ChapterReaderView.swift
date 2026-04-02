@@ -1957,6 +1957,7 @@ private func groupedItems(_ items: [ChapterLayerItem]) -> [LayerItemGroup] {
 struct DefaultLayerContentView: View {
     let items: [ChapterLayerItem]
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1970,9 +1971,11 @@ struct DefaultLayerContentView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .font(ArabicTypography.swiftUIFont(size: UIFont.preferredFont(forTextStyle: .title2).pointSize))
+        .font(ArabicTypography.swiftUIFont(size: appSettings.contentFontSize))
         .lineSpacing(10)
         .foregroundStyle(colorScheme == .dark ? Color.white : AppTheme.textPrimary)
+        // ScrollView + attributed text can leave the first row’s layout stale until re-navigation; font-scoped id forces a fresh pass.
+        .id(appSettings.contentFontSize)
     }
 }
 
@@ -1994,6 +1997,7 @@ private struct InlineLayerRow: View {
 private struct LayerSingleItemView: View {
     let item: ChapterLayerItem
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         HintToggleItem(hint: item.hint, mode: .block) {
@@ -2001,7 +2005,7 @@ private struct LayerSingleItemView: View {
                 switch item.style {
                 case "header":
                     ItemBodyText(html: item.body)
-                        .font(ArabicTypography.swiftUIFont(size: UIFont.preferredFont(forTextStyle: .title2).pointSize).weight(.semibold))
+                        .font(ArabicTypography.swiftUIFont(size: appSettings.contentFontSize).weight(.semibold))
                 case "block":
                     ItemBodyText(html: item.body)
                         .padding(.vertical, 6)
@@ -2158,6 +2162,7 @@ private struct InlineSegmentText: View {
         Text(attributedWithOptionalSpace(attributed))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
+            .id(appSettings.contentFontSize)
     }
 
     private func attributedWithOptionalSpace(_ base: AttributedString) -> AttributedString {
@@ -2318,6 +2323,7 @@ struct ItemBodyText: View {
         Text(Self.attributed(from: html, fontSize: appSettings.contentFontSize))
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
+            .id(appSettings.contentFontSize)
     }
 
     static func attributed(from html: String, fontSize: CGFloat = 30) -> AttributedString {
