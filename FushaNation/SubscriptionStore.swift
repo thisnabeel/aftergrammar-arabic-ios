@@ -13,19 +13,12 @@ final class SubscriptionStore: ObservableObject {
     private var transactionListenerTask: Task<Void, Never>?
 
     init() {
-        // Previews launch a JIT app process (`XCODE_RUNNING_FOR_PLAYGROUNDS`); StoreKit
-        // listeners here correlate with “Failed to launch / launchd job spawn failed” on some setups.
-        guard !Self.isRunningInXcodePreview else { return }
         transactionListenerTask = Task { [weak self] in
             for await update in Transaction.updates {
                 await self?.process(transactionUpdate: update)
             }
         }
         Task { await refreshEntitlement() }
-    }
-
-    private static var isRunningInXcodePreview: Bool {
-        ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PLAYGROUNDS"] == "1"
     }
 
     deinit {

@@ -64,11 +64,12 @@ struct ChapterLayer: Decodable, Identifiable {
     let chapterLayerItems: [ChapterLayerItem]
 }
 
-struct ChapterLayerSubLayerItem: Decodable, Identifiable, Hashable {
+/// Optional reading variant for a layer item (e.g. harakaat, grammar).
+struct ChapterSubLayerItem: Decodable, Identifiable, Hashable {
     let id: Int
-    let languageChapterSublayerId: Int?
-    let sublayerName: String?
-    let body: String?
+    let languageChapterSublayerId: Int
+    let sublayerName: String
+    let body: String
     let hint: String?
 }
 
@@ -79,10 +80,9 @@ struct ChapterLayerItem: Decodable, Identifiable, Hashable {
     let style: String
     let hint: String?
     let position: Int
-    let subLayerItems: [ChapterLayerSubLayerItem]
+    let subLayerItems: [ChapterSubLayerItem]
 
-    /// Use `subLayerItems` (not `sub_layer_items`): `JSONDecoder.convertFromSnakeCase` maps JSON `sub_layer_items` → `subLayerItems`.
-    enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey {
         case id, chapterLayerId, body, style, hint, position, subLayerItems
     }
 
@@ -94,9 +94,10 @@ struct ChapterLayerItem: Decodable, Identifiable, Hashable {
         style = try c.decode(String.self, forKey: .style)
         hint = try c.decodeIfPresent(String.self, forKey: .hint)
         position = try c.decode(Int.self, forKey: .position)
-        subLayerItems = try c.decodeIfPresent([ChapterLayerSubLayerItem].self, forKey: .subLayerItems) ?? []
+        subLayerItems = try c.decodeIfPresent([ChapterSubLayerItem].self, forKey: .subLayerItems) ?? []
     }
 
+    /// Merge helper when building layers in memory (pagination).
     init(
         id: Int,
         chapterLayerId: Int,
@@ -104,7 +105,7 @@ struct ChapterLayerItem: Decodable, Identifiable, Hashable {
         style: String,
         hint: String?,
         position: Int,
-        subLayerItems: [ChapterLayerSubLayerItem]
+        subLayerItems: [ChapterSubLayerItem]
     ) {
         self.id = id
         self.chapterLayerId = chapterLayerId
@@ -115,62 +116,32 @@ struct ChapterLayerItem: Decodable, Identifiable, Hashable {
         self.subLayerItems = subLayerItems
     }
 
-    /// Merge sublayers when the same item id appears across paginated chapter detail responses.
-    func mergedWithIncomingPage(_ incoming: ChapterLayerItem) -> ChapterLayerItem {
-        var subById: [Int: ChapterLayerSubLayerItem] = Dictionary(uniqueKeysWithValues: subLayerItems.map { ($0.id, $0) })
-        for s in incoming.subLayerItems {
-            subById[s.id] = s
+    func resolvedBody(sublayerSelection: String?) -> String {
+        guard let sel = sublayerSelection?.trimmingCharacters(in: .whitespacesAndNewlines), !sel.isEmpty else {
+            return body
         }
-        let mergedSubs = subById.values.sorted { $0.id < $1.id }
-        return ChapterLayerItem(
-            id: incoming.id,
-            chapterLayerId: incoming.chapterLayerId,
-            body: incoming.body,
-            style: incoming.style,
-            hint: incoming.hint,
-            position: incoming.position,
-            subLayerItems: mergedSubs
-        )
+        guard let match = subLayerItems.first(where: {
+            $0.sublayerName.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(sel) == .orderedSame
+        }) else {
+            return body
+        }
+        let trimmed = match.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? body : match.body
     }
 
-    func sublayer(matching selection: String?) -> ChapterLayerSubLayerItem? {
-        guard let raw = selection?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
-        return subLayerItems.first {
-            guard let n = $0.sublayerName?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty else { return false }
-            return n.caseInsensitiveCompare(raw) == .orderedSame
+    func resolvedHint(sublayerSelection: String?) -> String? {
+        guard let sel = sublayerSelection?.trimmingCharacters(in: .whitespacesAndNewlines), !sel.isEmpty else {
+            return hint
         }
-    }
-
-    func effectiveBody(sublayerSelection: String?) -> String {
-        if let sub = sublayer(matching: sublayerSelection),
-           let full = sub.body,
-           !full.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return full
+        guard let match = subLayerItems.first(where: {
+            $0.sublayerName.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(sel) == .orderedSame
+        }) else {
+            return hint
         }
-        return body
-    }
-
-    func effectiveHint(sublayerSelection: String?) -> String? {
-        if let sub = sublayer(matching: sublayerSelection) {
-            if let h = sub.hint?.trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty {
-                return h
-            }
+        if let h = match.hint?.trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty {
+            return h
         }
-        if let h = hint?.trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty { return h }
-        return nil
-    }
-
-    /// HTML for `ItemBodyText` / inline segments; wraps plain text when the sublayer body has no tags.
-    func htmlForDisplay(sublayerSelection: String?) -> String {
-        let raw = effectiveBody(sublayerSelection: sublayerSelection)
-        if raw.range(of: "<\\s*[a-zA-Z]", options: .regularExpression) != nil {
-            return raw
-        }
-        let escaped = raw
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-        return "<p dir=\"rtl\" style=\"margin:0;\">\(escaped)</p>"
+        return hint
     }
 }
 

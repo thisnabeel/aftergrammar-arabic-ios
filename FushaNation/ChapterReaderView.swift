@@ -26,7 +26,7 @@ struct ChapterReaderView: View {
     @State private var isLoadingMoreItems = false
     @EnvironmentObject private var subscriptionStore: SubscriptionStore
     @State private var paywallPresented = false
-    /// When set, layer items that include this `sublayer_name` render that sublayer body/hint instead of the default.
+    /// When set, layer items show matching `sub_layer_items` body/hint when present.
     @State private var selectedSublayerName: String?
 
     init(chapterId: Int, breadcrumbTitles: [String] = [], listContextTitle: String = "") {
@@ -89,21 +89,6 @@ struct ChapterReaderView: View {
                                 .padding(.top, 8)
                                 .padding(.bottom, 6)
                                 .background(screenBackground)
-                        } else if topTab == .layers,
-                                  (detail.chapter.chapterMode ?? "text").lowercased() == "text",
-                                  let layer = Self.pickDefaultLayer(from: detail.chapterLayers) {
-                            let names = Self.orderedSublayerNames(in: layer)
-                            if !names.isEmpty {
-                                SublayerNamePickerStrip(
-                                    names: names,
-                                    selectedName: $selectedSublayerName,
-                                    colorScheme: colorScheme
-                                )
-                                .padding(.horizontal, 8)
-                                .padding(.top, 6)
-                                .padding(.bottom, 4)
-                                .background(screenBackground)
-                            }
                         }
 
                         // Always keep the chapter visible + scrollable under the fixed rows.
@@ -150,9 +135,6 @@ struct ChapterReaderView: View {
         }
         .task(id: chapterId) {
             await load()
-        }
-        .onChange(of: chapterId) { _, _ in
-            selectedSublayerName = nil
         }
         .onChange(of: topTab) { _, newTab in
             guard newTab == .quiz else { return }
@@ -235,7 +217,7 @@ struct ChapterReaderView: View {
     private func defaultLayerScroll(_ detail: ChapterDetailResponse) -> some View {
         if let layer = Self.pickDefaultLayer(from: detail.chapterLayers) {
             ScrollView {
-                DefaultLayerContentView(items: layer.chapterLayerItems, sublayerSelection: selectedSublayerName)
+                DefaultLayerContentView(items: layer.chapterLayerItems)
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(readerCardBackground)
@@ -371,7 +353,7 @@ struct ChapterReaderView: View {
         var map: [Int: ChapterLayerItem] = Dictionary(uniqueKeysWithValues: left.map { ($0.id, $0) })
         for item in right {
             if let existing = map[item.id] {
-                map[item.id] = existing.mergedWithIncomingPage(item)
+                map[item.id] = mergeTwoLayerItems(existing, item)
             } else {
                 map[item.id] = item
             }
@@ -382,20 +364,21 @@ struct ChapterReaderView: View {
         }
     }
 
-    /// Unique sublayer display names in stable order of first appearance across all items in the layer.
-    private static func orderedSublayerNames(in layer: ChapterLayer) -> [String] {
-        var seen = Set<String>()
-        var ordered: [String] = []
-        for item in layer.chapterLayerItems.sorted(by: { $0.position < $1.position }) {
-            for sub in item.subLayerItems {
-                guard let raw = sub.sublayerName?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { continue }
-                let key = raw.lowercased()
-                if seen.insert(key).inserted {
-                    ordered.append(raw)
-                }
-            }
+    private static func mergeTwoLayerItems(_ existing: ChapterLayerItem, _ incoming: ChapterLayerItem) -> ChapterLayerItem {
+        var subById: [Int: ChapterSubLayerItem] = Dictionary(uniqueKeysWithValues: existing.subLayerItems.map { ($0.id, $0) })
+        for s in incoming.subLayerItems {
+            subById[s.id] = s
         }
-        return ordered
+        let mergedSubs = subById.values.sorted { $0.id < $1.id }
+        return ChapterLayerItem(
+            id: incoming.id,
+            chapterLayerId: incoming.chapterLayerId,
+            body: incoming.body,
+            style: incoming.style,
+            hint: incoming.hint,
+            position: incoming.position,
+            subLayerItems: mergedSubs
+        )
     }
 
     private var quizHasQuestions: Bool {
@@ -451,46 +434,6 @@ struct ChapterReaderView: View {
             return mcq
         }
         return nonEmpty.first
-    }
-}
-
-private struct SublayerNamePickerStrip: View {
-    let names: [String]
-    @Binding var selectedName: String?
-    var colorScheme: ColorScheme
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(names, id: \.self) { name in
-                    let selected = selectedName?.caseInsensitiveCompare(name) == .orderedSame
-                    Button {
-                        if selected {
-                            selectedName = nil
-                        } else {
-                            selectedName = name
-                        }
-                    } label: {
-                        Text(name)
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .foregroundStyle(selected ? Color.white : (colorScheme == .dark ? Color.white : AppTheme.textPrimary))
-                            .background(
-                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .fill(selected ? AppTheme.forestGreen : (colorScheme == .dark ? Color.white.opacity(0.12) : Color.white.opacity(0.75)))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .stroke(selected ? Color.clear : Color.secondary.opacity(0.28), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.vertical, 2)
-        }
     }
 }
 
@@ -1990,16 +1933,6 @@ private enum LayerItemGroup: Identifiable {
     }
 }
 
-/// Stable identity for layer text rows so SwiftUI refreshes when HTML or reader font changes (`HintToggleItem` alone only diffs `hint` + `mode`).
-private func layerItemRenderIdentity(itemId: Int, html: String, fontSize: CGFloat, layoutStyle: String? = nil) -> String {
-    var h = Hasher()
-    h.combine(itemId)
-    h.combine(html)
-    h.combine(fontSize)
-    if let layoutStyle { h.combine(layoutStyle) }
-    return String(h.finalize())
-}
-
 private func groupedItems(_ items: [ChapterLayerItem]) -> [LayerItemGroup] {
     let sorted = items.sorted { $0.position < $1.position }
     var groups: [LayerItemGroup] = []
@@ -2023,7 +1956,6 @@ private func groupedItems(_ items: [ChapterLayerItem]) -> [LayerItemGroup] {
 
 struct DefaultLayerContentView: View {
     let items: [ChapterLayerItem]
-    var sublayerSelection: String?
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -2031,33 +1963,28 @@ struct DefaultLayerContentView: View {
             ForEach(groupedItems(items)) { group in
                 switch group {
                 case .inline(let parts):
-                    InlineLayerRow(items: parts, sublayerSelection: sublayerSelection)
+                    InlineLayerRow(items: parts)
                 case .single(let item):
-                    LayerSingleItemView(item: item, sublayerSelection: sublayerSelection)
+                    LayerSingleItemView(item: item)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(ArabicTypography.swiftUIFont(size: UIFont.preferredFont(forTextStyle: .title2).pointSize))
-        .lineSpacing(4)
+        .lineSpacing(10)
         .foregroundStyle(colorScheme == .dark ? Color.white : AppTheme.textPrimary)
     }
 }
 
 private struct InlineLayerRow: View {
     let items: [ChapterLayerItem]
-    var sublayerSelection: String?
-    @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
         InlineFlowLayout(horizontalSpacing: 0, verticalSpacing: 0) {
             ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
-                let html = item.htmlForDisplay(sublayerSelection: sublayerSelection)
-                HintToggleItem(hint: item.effectiveHint(sublayerSelection: sublayerSelection), mode: .inline) {
-                    InlineSegmentText(html: html, addTrailingSpace: idx != items.count - 1)
+                HintToggleItem(hint: item.hint, mode: .inline) {
+                    InlineSegmentText(html: item.body, addTrailingSpace: idx != items.count - 1)
                 }
-                // HintToggleItem only compares `hint` + `mode`; html/font can change without that, so SwiftUI may reuse stale content (first inline segments).
-                .id(layerItemRenderIdentity(itemId: item.id, html: html, fontSize: appSettings.contentFontSize))
             }
         }
         .padding(.vertical, 0)
@@ -2066,23 +1993,20 @@ private struct InlineLayerRow: View {
 
 private struct LayerSingleItemView: View {
     let item: ChapterLayerItem
-    var sublayerSelection: String?
     @Environment(\.colorScheme) private var colorScheme
-    @EnvironmentObject private var appSettings: AppSettings
 
     var body: some View {
-        let html = item.htmlForDisplay(sublayerSelection: sublayerSelection)
-        HintToggleItem(hint: item.effectiveHint(sublayerSelection: sublayerSelection), mode: .block) {
+        HintToggleItem(hint: item.hint, mode: .block) {
             Group {
                 switch item.style {
                 case "header":
-                    ItemBodyText(html: html)
+                    ItemBodyText(html: item.body)
                         .font(ArabicTypography.swiftUIFont(size: UIFont.preferredFont(forTextStyle: .title2).pointSize).weight(.semibold))
                 case "block":
-                    ItemBodyText(html: html)
-                        .padding(.vertical, 2)
+                    ItemBodyText(html: item.body)
+                        .padding(.vertical, 6)
                 case "quote":
-                    ItemBodyText(html: html)
+                    ItemBodyText(html: item.body)
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2091,14 +2015,14 @@ private struct LayerSingleItemView: View {
                 case "bullet":
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("•")
-                        ItemBodyText(html: html)
+                        ItemBodyText(html: item.body)
                     }
                     .padding(.vertical, 2)
                 case "ordered":
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("◦")
                             .foregroundStyle(Color.secondary)
-                        ItemBodyText(html: html)
+                        ItemBodyText(html: item.body)
                     }
                     .padding(.vertical, 2)
                 case "line_break":
@@ -2106,14 +2030,13 @@ private struct LayerSingleItemView: View {
                 case "hr":
                     Divider().padding(.vertical, 12)
                 case "inline":
-                    ItemBodyText(html: html)
+                    ItemBodyText(html: item.body)
                 default:
-                    ItemBodyText(html: html)
-                        .padding(.vertical, 2)
+                    ItemBodyText(html: item.body)
+                        .padding(.vertical, 4)
                 }
             }
         }
-        .id(layerItemRenderIdentity(itemId: item.id, html: html, fontSize: appSettings.contentFontSize, layoutStyle: item.style))
     }
 
     private var quoteBackground: Color {
@@ -2147,13 +2070,10 @@ private struct HintToggleItem<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: mode == .inline ? 2 : 6) {
+        VStack(alignment: .leading, spacing: mode == .inline ? 2 : 8) {
             content()
                 .frame(maxWidth: mode == .block ? .infinity : nil, alignment: .leading)
-                // Minimal insets: hint tap target uses contentShape; avoid padding that reads as huge gaps around dashes.
-                .padding(.top, hasHint && showHint ? (mode == .block ? 8 : 4) : 0)
-                .padding(.horizontal, hasHint && showHint ? (mode == .block ? 10 : 4) : 0)
-                .padding(.bottom, hasHint && showHint ? (mode == .block ? 8 : 4) : 0)
+                .padding(hasHint ? (mode == .block ? 10 : 2) : 0)
                 .background {
                     if hasHint, showHint {
                         RoundedRectangle(cornerRadius: mode == .block ? 8 : 4, style: .continuous)
@@ -2167,11 +2087,12 @@ private struct HintToggleItem<Content: View>: View {
                                 hintUnderlineColor,
                                 style: StrokeStyle(lineWidth: underlineLineWidth, lineCap: .round, dash: [3, 6])
                             )
-                            .frame(height: 3)
-                            .offset(y: 0)
+                            .frame(height: 6)
+                            .padding(.horizontal, mode == .block ? 10 : 2)
+                            .offset(y: mode == .block ? 8 : 4)
+                            .shadow(color: hintUnderlineColor.opacity(colorScheme == .dark ? 0.08 : 0.22), radius: 0.4, x: 0, y: 0.4)
                     }
                 }
-                .padding(.bottom, hasHint && !showHint ? 2 : 0)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     guard hasHint else { return }
@@ -2418,22 +2339,6 @@ struct ItemBodyText: View {
                 mutable.addAttribute(.font, value: resized, range: range)
             }
             mutable.addAttribute(.foregroundColor, value: UIColor.label, range: full)
-
-            // HTML `<p>` / default WebKit styles often add large paragraph spacing; tighten for reader layout.
-            var sawParagraphStyle = false
-            mutable.enumerateAttribute(.paragraphStyle, in: full) { value, range, _ in
-                sawParagraphStyle = true
-                let m = ((value as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
-                m.paragraphSpacing = 0
-                m.paragraphSpacingBefore = 0
-                mutable.addAttribute(.paragraphStyle, value: m, range: range)
-            }
-            if !sawParagraphStyle {
-                let m = NSMutableParagraphStyle()
-                m.paragraphSpacing = 0
-                m.paragraphSpacingBefore = 0
-                mutable.addAttribute(.paragraphStyle, value: m, range: full)
-            }
 
             return AttributedString(mutable)
         }
